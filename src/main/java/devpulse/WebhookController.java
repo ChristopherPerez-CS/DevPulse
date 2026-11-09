@@ -7,17 +7,15 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
-import java.time.Instant;
 import java.util.HexFormat;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
+import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
@@ -26,23 +24,17 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 public class WebhookController {
 
-    public record Event(String delivery, String repo, String branch, String author,
-                        List<String> files, Instant receivedAt) {}
-
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final String HMAC = "HmacSHA256";
     private static final String BRANCH_PREFIX = "refs/heads/";
 
     private final byte[] secret;
-    private final Map<String, Event> events = new ConcurrentHashMap<>();
+    private final JdbcClient jdbc;
 
-    WebhookController(@Value("${devpulse.webhook-secret}") String secret) {
+    WebhookController(@Value("${devpulse.webhook-secret}") String secret, JdbcClient jdbc) {
         if (secret.isBlank()) throw new IllegalStateException("devpulse.webhook-secret must not be blank");
         this.secret = secret.getBytes(UTF_8);
-    }
-
-    Map<String, Event> events() {
-        return events;
+        this.jdbc = jdbc;
     }
 
     @PostMapping("/webhook")
@@ -82,13 +74,20 @@ public class WebhookController {
             for (String key : List.of("added", "modified", "removed"))
                 for (JsonNode f : commit.path(key)) files.add(f.asText());
 
-        Event event = new Event(delivery, repo, ref.substring(BRANCH_PREFIX.length()), author,
-                List.copyOf(files), Instant.now());
+        // 3. Atomic dedup: the primary key on delivery_id decides, not application code.
+        //    A database error propagates as a 500, so GitHub retries instead of losing the event.
+        int inserted = jdbc.sql("""
+                INSERT INTO events (delivery_id, repo, branch, author, files)
+                VALUES (:id, :repo, :branch, :author, CAST(:files AS jsonb))
+                ON CONFLICT (delivery_id) DO NOTHING""")
+                .param("id", delivery)
+                .param("repo", repo)
+                .param("branch", ref.substring(BRANCH_PREFIX.length()))
+                .param("author", author)
+                .param("files", JSON.valueToTree(files).toString())
+                .update();
 
-        // 3. Atomic dedup: a retried delivery returns 200 without being stored twice.
-        return events.putIfAbsent(delivery, event) == null
-                ? ResponseEntity.status(201).build()
-                : ResponseEntity.ok().build();
+        return inserted == 1 ? ResponseEntity.status(201).build() : ResponseEntity.ok().build();
     }
 
     private String sign(byte[] body) {
