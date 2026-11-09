@@ -10,4 +10,6 @@ jobs:
           distribution: temurin
           java-version: 17
           cache: maven
+      - name: Let Testcontainers talk to newer Docker Engines
+        run: echo "api.version=1.44" > ~/.docker-java.properties
       - run: mvn -B test
