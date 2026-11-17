@@ -2,6 +2,7 @@ package devpulse;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -129,6 +130,65 @@ class WebhookTest {
 
         String body = stream.getResponse().getContentAsString();
         assertEquals(1, body.split("\"delivery\":\"d1\"", -1).length - 1, body);
+    }
+
+    static String push(String branch, String author, String file) {
+        return """
+            {"ref":"refs/heads/%s","repository":{"full_name":"acme/app"},"sender":{"login":"%s"},
+             "commits":[{"added":[],"modified":["%s"],"removed":[]}]}""".formatted(branch, author, file);
+    }
+
+    @Test
+    void sharedFileOnAnotherBranchByAnotherAuthorIsFlagged() throws Exception {
+        MvcResult stream = mvc.perform(get("/events/stream"))
+                .andExpect(request().asyncStarted()).andReturn();
+
+        send("push", "d1", sign(PUSH), PUSH).andExpect(status().isCreated()); // alice on feature-x: a, b, c
+        String bob = push("feature-y", "bob", "b.txt");
+        send("push", "d2", sign(bob), bob).andExpect(status().isCreated());
+
+        String body = stream.getResponse().getContentAsString();
+        int at = body.indexOf("event:overlap");
+        assertTrue(at >= 0, body);
+        String overlap = body.substring(at);
+        assertTrue(overlap.contains("\"otherBranch\":\"feature-x\""), body);
+        assertTrue(overlap.contains("\"otherAuthor\":\"alice\""), body);
+        assertTrue(overlap.contains("\"files\":[\"b.txt\"]"), body);
+    }
+
+    @Test
+    void sameAuthorSameBranchOrDisjointFilesAreNotFlagged() throws Exception {
+        MvcResult stream = mvc.perform(get("/events/stream"))
+                .andExpect(request().asyncStarted()).andReturn();
+
+        send("push", "d1", sign(PUSH), PUSH).andExpect(status().isCreated()); // alice on feature-x: a, b, c
+        // Each case uses its own file so earlier pushes can't trigger a legitimate overlap in a later one.
+        String[][] others = {
+                {"d2", "feature-y", "alice", "a.txt"},   // same author as d1
+                {"d3", "feature-x", "bob", "c.txt"},     // same branch as d1
+                {"d4", "feature-z", "bob", "other.txt"}  // no shared file with anything
+        };
+        for (String[] o : others) {
+            String body = push(o[1], o[2], o[3]);
+            send("push", o[0], sign(body), body).andExpect(status().isCreated());
+        }
+
+        String streamed = stream.getResponse().getContentAsString();
+        assertFalse(streamed.contains("event:overlap"), streamed);
+    }
+
+    @Test
+    void staleActivityIsIgnored() throws Exception {
+        jdbc.sql("INSERT INTO events (delivery_id, repo, branch, author, files, received_at) "
+                + "VALUES ('old', 'acme/app', 'feature-x', 'alice', CAST('[\"b.txt\"]' AS jsonb), "
+                + "now() - interval '8 days')").update();
+        MvcResult stream = mvc.perform(get("/events/stream"))
+                .andExpect(request().asyncStarted()).andReturn();
+
+        String bob = push("feature-y", "bob", "b.txt");
+        send("push", "d2", sign(bob), bob).andExpect(status().isCreated());
+
+        assertFalse(stream.getResponse().getContentAsString().contains("event:overlap"));
     }
 
     private long count() {

@@ -14,6 +14,8 @@ import java.util.List;
 import java.util.Set;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -25,6 +27,7 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 public class WebhookController {
 
+    private static final Logger log = LoggerFactory.getLogger(WebhookController.class);
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final String HMAC = "HmacSHA256";
     private static final String BRANCH_PREFIX = "refs/heads/";
@@ -32,12 +35,15 @@ public class WebhookController {
     private final byte[] secret;
     private final JdbcClient jdbc;
     private final EventFeed feed;
+    private final OverlapDetector overlaps;
 
-    WebhookController(@Value("${devpulse.webhook-secret}") String secret, JdbcClient jdbc, EventFeed feed) {
+    WebhookController(@Value("${devpulse.webhook-secret}") String secret, JdbcClient jdbc,
+                      EventFeed feed, OverlapDetector overlaps) {
         if (secret.isBlank()) throw new IllegalStateException("devpulse.webhook-secret must not be blank");
         this.secret = secret.getBytes(UTF_8);
         this.jdbc = jdbc;
         this.feed = feed;
+        this.overlaps = overlaps;
     }
 
     @PostMapping("/webhook")
@@ -95,6 +101,14 @@ public class WebhookController {
 
         // 4. Broadcast only after the row is saved, so clients never see an event that isn't stored.
         feed.publish(new Event(delivery, repo, branch, author, List.copyOf(files), Instant.now()));
+
+        // 5. Overlap warnings are best effort. The event is already stored and broadcast, and a retry
+        //    would be deduplicated, so a failure here is logged instead of turned into a 500.
+        try {
+            overlaps.find(repo, branch, author, files).forEach(feed::warn);
+        } catch (RuntimeException e) {
+            log.warn("Overlap check failed for delivery {}", delivery, e);
+        }
         return ResponseEntity.status(201).build();
     }
 

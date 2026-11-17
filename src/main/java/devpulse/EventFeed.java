@@ -24,10 +24,19 @@ class EventFeed {
     }
 
     void publish(Event event) {
+        broadcast("push", event.delivery(), event);
+    }
+
+    void warn(Overlap overlap) {
+        broadcast("overlap", null, overlap);
+    }
+
+    private void broadcast(String name, String id, Object data) {
         for (SseEmitter client : clients) {
             try {
-                client.send(SseEmitter.event().name("push").id(event.delivery())
-                        .data(event, MediaType.APPLICATION_JSON));
+                SseEmitter.SseEventBuilder builder = SseEmitter.event().name(name);
+                if (id != null) builder.id(id);
+                client.send(builder.data(data, MediaType.APPLICATION_JSON));
             } catch (IOException | IllegalStateException e) {
                 clients.remove(client); // disconnected client
             }
