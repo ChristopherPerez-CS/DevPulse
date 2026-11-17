@@ -2,7 +2,11 @@ package devpulse;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.request;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import java.util.HexFormat;
@@ -18,6 +22,7 @@ import org.springframework.boot.testcontainers.service.connection.ServiceConnect
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -87,6 +92,43 @@ class WebhookTest {
         send("ping", "d2", sign(ping), ping).andExpect(status().isOk());
 
         assertEquals(0L, count());
+    }
+
+    @Test
+    void eventsEndpointReturnsStoredPushes() throws Exception {
+        send("push", "d1", sign(PUSH), PUSH).andExpect(status().isCreated());
+
+        mvc.perform(get("/events"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].delivery").value("d1"))
+                .andExpect(jsonPath("$[0].repo").value("acme/app"))
+                .andExpect(jsonPath("$[0].branch").value("feature-x"))
+                .andExpect(jsonPath("$[0].author").value("alice"))
+                .andExpect(jsonPath("$[0].files[1]").value("b.txt"));
+    }
+
+    @Test
+    void newPushIsStreamedToSubscribers() throws Exception {
+        MvcResult stream = mvc.perform(get("/events/stream"))
+                .andExpect(request().asyncStarted()).andReturn();
+
+        send("push", "d1", sign(PUSH), PUSH).andExpect(status().isCreated());
+
+        String body = stream.getResponse().getContentAsString();
+        assertTrue(body.contains("event:push"), body);
+        assertTrue(body.contains("\"delivery\":\"d1\""), body);
+    }
+
+    @Test
+    void duplicateDeliveryIsStreamedOnce() throws Exception {
+        MvcResult stream = mvc.perform(get("/events/stream"))
+                .andExpect(request().asyncStarted()).andReturn();
+
+        send("push", "d1", sign(PUSH), PUSH).andExpect(status().isCreated());
+        send("push", "d1", sign(PUSH), PUSH).andExpect(status().isOk());
+
+        String body = stream.getResponse().getContentAsString();
+        assertEquals(1, body.split("\"delivery\":\"d1\"", -1).length - 1, body);
     }
 
     private long count() {

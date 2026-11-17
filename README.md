@@ -14,7 +14,7 @@ Work in progress.
 | PostgreSQL storage with Flyway migrations          | Done    |
 | Integration tests against real Postgres (Testcontainers) | Done |
 | GitHub Actions CI                                  | Done    |
-| Live feed (`GET /events` + Server-Sent Events)     | Planned |
+| Live feed (`GET /events` + Server-Sent Events)     | Done    |
 | File-overlap detection across open branches        | Planned |
 | Next.js UI                                         | Planned |
 | Diff view (GitHub API)                             | Planned |

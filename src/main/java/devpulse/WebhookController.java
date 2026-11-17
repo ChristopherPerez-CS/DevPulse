@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
+import java.time.Instant;
 import java.util.HexFormat;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -30,11 +31,13 @@ public class WebhookController {
 
     private final byte[] secret;
     private final JdbcClient jdbc;
+    private final EventFeed feed;
 
-    WebhookController(@Value("${devpulse.webhook-secret}") String secret, JdbcClient jdbc) {
+    WebhookController(@Value("${devpulse.webhook-secret}") String secret, JdbcClient jdbc, EventFeed feed) {
         if (secret.isBlank()) throw new IllegalStateException("devpulse.webhook-secret must not be blank");
         this.secret = secret.getBytes(UTF_8);
         this.jdbc = jdbc;
+        this.feed = feed;
     }
 
     @PostMapping("/webhook")
@@ -68,6 +71,7 @@ public class WebhookController {
         String repo = p.path("repository").path("full_name").asText("");
         String author = p.path("sender").path("login").asText("");
         if (repo.isBlank() || author.isBlank()) return ResponseEntity.badRequest().build();
+        String branch = ref.substring(BRANCH_PREFIX.length());
 
         Set<String> files = new LinkedHashSet<>();
         for (JsonNode commit : p.path("commits"))
@@ -82,12 +86,16 @@ public class WebhookController {
                 ON CONFLICT (delivery_id) DO NOTHING""")
                 .param("id", delivery)
                 .param("repo", repo)
-                .param("branch", ref.substring(BRANCH_PREFIX.length()))
+                .param("branch", branch)
                 .param("author", author)
                 .param("files", JSON.valueToTree(files).toString())
                 .update();
 
-        return inserted == 1 ? ResponseEntity.status(201).build() : ResponseEntity.ok().build();
+        if (inserted == 0) return ResponseEntity.ok().build(); // duplicate: stored once, broadcast once
+
+        // 4. Broadcast only after the row is saved, so clients never see an event that isn't stored.
+        feed.publish(new Event(delivery, repo, branch, author, List.copyOf(files), Instant.now()));
+        return ResponseEntity.status(201).build();
     }
 
     private String sign(byte[] body) {
